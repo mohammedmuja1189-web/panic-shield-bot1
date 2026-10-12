@@ -1,9 +1,12 @@
+import os
 import asyncio
 import aiohttp
+from aiohttp import web
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TELEGRAM_BOT_TOKEN = "8888331288:AAEwrMBWXjIF_mhiAARTtD2Kt4OHqrVn4ek"
+TELEGRAM_BOT_TOKEN = os.getenv("8888331288:AAEwrMBWXjIF_mhiAARTtD2Kt4OHqrVn4ek", "8888331288:AAEwrMBWXjIF_mhiAARTtD2Kt4OHqrVn4ek")
+PORT = int(os.getenv("PORT", 8080))
 
 ACTIVE_POSITIONS = {}
 
@@ -44,7 +47,7 @@ async def monitor_position(ca: str, chat_id: int, context: ContextTypes.DEFAULT_
 
         peak_mcap = pos["peak"]
 
-        # Alert 1: Liquidity Drain / Rug Check
+        # Alert 1: Liquidity Drain / Rug
         if curr_liq < 3000 and entry_mcap > 20000:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -53,31 +56,21 @@ async def monitor_position(ca: str, chat_id: int, context: ContextTypes.DEFAULT_
             )
             break
 
-        # Alert 2: 2x Take Profit Trigger
+        # Alert 2: 2x Take Profit
         if curr_mcap >= (entry_mcap * 2.0) and not pos["tp_hit"]:
             pos["tp_hit"] = True
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    f"🎯 *2X TARGET HIT: ${symbol}*\n"
-                    f"• Entry: `${entry_mcap:,.0f}`\n"
-                    f"• Current: `${curr_mcap:,.0f}`\n"
-                    f"💡 *Action:* Sell 50% to recover initial capital!"
-                ),
+                text=f"🎯 *2X HIT: ${symbol}*\n• Entry: `${entry_mcap:,.0f}`\n• Current: `${curr_mcap:,.0f}`\n💡 Recover your initial investment!",
                 parse_mode="Markdown"
             )
 
-        # Alert 3: Trailing Floor (30% drop from highest point)
+        # Alert 3: Trailing Floor (-30% off peak)
         if peak_mcap >= (entry_mcap * 1.20):
             if (peak_mcap - curr_mcap) / peak_mcap >= 0.30:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=(
-                        f"🛡️ *TRAILING FLOOR HIT: ${symbol}*\n"
-                        f"• Peak MCap: `${peak_mcap:,.0f}`\n"
-                        f"• Current: `${curr_mcap:,.0f}`\n"
-                        f"⚠️ Momentum broken. Close position to lock in profit."
-                    ),
+                    text=f"🛡️ *TRAILING FLOOR HIT: ${symbol}*\n• Peak: `${peak_mcap:,.0f}`\n• Current: `${curr_mcap:,.0f}`\n⚠️ Momentum broke.",
                     parse_mode="Markdown"
                 )
                 break
@@ -87,10 +80,7 @@ async def monitor_position(ca: str, chat_id: int, context: ContextTypes.DEFAULT_
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "❌ *Usage:*\n`/track <TOKEN_CA> <ENTRY_MCAP>`\n\n*Example:*\n`/track 7xKX... 50k`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("Usage: `/track <TOKEN_CA> <ENTRY_MCAP>`\nExample: `/track 7xKX... 50k`", parse_mode="Markdown")
         return
 
     ca = context.args[0].strip()
@@ -99,29 +89,16 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mult = 1_000_000 if raw.endswith("m") else (1_000 if raw.endswith("k") else 1)
         entry_mcap = float(raw.rstrip("km")) * mult
     except ValueError:
-        await update.message.reply_text("❌ Invalid market cap. Example: `50k`, `250000`, `1.2m`")
+        await update.message.reply_text("Invalid market cap value.")
         return
 
-    status_msg = await update.message.reply_text("🔎 Fetching pool data...")
     data = await fetch_token_data(ca)
     if not data:
-        await status_msg.edit_text("❌ Token not found on DexScreener.")
+        await update.message.reply_text("Token not found on DexScreener.")
         return
 
-    ACTIVE_POSITIONS[ca] = {
-        "entry": entry_mcap,
-        "peak": max(entry_mcap, data["mcap"]),
-        "tp_hit": False
-    }
-
-    await status_msg.edit_text(
-        f"🛡️ *Shield Active for ${data['symbol']}*\n\n"
-        f"• Entry MCap: `${entry_mcap:,.0f}`\n"
-        f"• Current MCap: `${data['mcap']:,.0f}`\n"
-        f"• Liquidity: `${data['liquidity']:,.0f}`\n\n"
-        f"Quiet mode active. Notifications sent only for TP (2x), Trailing floor (-30%), or Rug alert.",
-        parse_mode="Markdown"
-    )
+    ACTIVE_POSITIONS[ca] = {"entry": entry_mcap, "peak": max(entry_mcap, data["mcap"]), "tp_hit": False}
+    await update.message.reply_text(f"🛡️ Tracking `${data['symbol']}`! Entry MCap: `${entry_mcap:,.0f}`.")
     asyncio.create_task(monitor_position(ca, update.effective_chat.id, context))
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,14 +112,32 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Token not currently tracked.")
 
-def main():
-    if TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        raise ValueError("Please replace YOUR_TELEGRAM_BOT_TOKEN_HERE with your real BotFather token!")
+async def handle_ping(request):
+    return web.Response(text="Bot is healthy and running!")
+
+async def main():
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("track", track))
     app.add_handler(CommandHandler("stop", stop))
-    print("Bot is running...")
-    app.run_polling()
+
+    # Initialize Telegram polling
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # Mini webserver for 24/7 cloud health checks
+    web_app = web.Application()
+    web_app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    print(f"Bot running and listening on port {PORT}...")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
